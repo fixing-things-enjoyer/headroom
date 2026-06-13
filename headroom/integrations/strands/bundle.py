@@ -11,9 +11,6 @@ Strands-native primitives:
   needs the original; Strands' MCP dispatcher resolves it via this
   server. Works identically in streaming and non-streaming.
 
-* **Serena MCP** — semantic code intelligence (symbol search,
-  references, etc.). Auto-installed via ``uvx`` on first launch.
-
 * **HeadroomHookProvider** — the RTK-equivalent for Strands.
   Compresses tool outputs in-place via ``AfterToolCallEvent`` so
   verbose JSON / log / search outputs are shrunk before they
@@ -76,18 +73,11 @@ from headroom import HeadroomConfig
 from headroom.mcp_registry.install import (
     DEFAULT_PROXY_URL,
     build_headroom_spec,
-    build_serena_spec,
 )
 
 from .hooks import HeadroomHookProvider
 
 logger = logging.getLogger(__name__)
-
-#: Default Serena context — see https://github.com/oraios/serena for the
-#: full context catalog. ``ide-assistant`` is the closest match for a
-#: code-aware agent loop (the same context ``headroom wrap claude`` uses).
-DEFAULT_SERENA_CONTEXT = "ide-assistant"
-
 
 def _make_headroom_client(proxy_url: str) -> MCPClient:
     spec = build_headroom_spec(proxy_url)
@@ -99,17 +89,6 @@ def _make_headroom_client(proxy_url: str) -> MCPClient:
     # `partial` (not lambda) so mypy can infer the callable's signature.
     return MCPClient(partial(stdio_client, params))
 
-
-def _make_serena_client(context: str) -> MCPClient:
-    spec = build_serena_spec(context)
-    params = StdioServerParameters(
-        command=spec.command,
-        args=list(spec.args),
-        env=dict(spec.env) if spec.env else None,
-    )
-    return MCPClient(partial(stdio_client, params))
-
-
 @dataclass
 class HeadroomBundle:
     """Single helper that hands a Strands Agent every Headroom integration.
@@ -118,10 +97,7 @@ class HeadroomBundle:
         proxy_url: HTTP URL the Headroom MCP server should contact for
             retrieval. Default :data:`DEFAULT_PROXY_URL`
             (``http://127.0.0.1:8787``).
-        serena_context: Serena context label. Default ``"ide-assistant"``.
         enable_headroom_mcp: Include the Headroom MCP server. Default True.
-        enable_serena_mcp: Include the Serena MCP server. Default True.
-            Disabling skips the ``uvx`` first-launch download entirely.
         enable_hooks: Include :class:`HeadroomHookProvider` for in-place
             tool-output compression (the RTK-equivalent for Strands).
             Default True.
@@ -136,9 +112,7 @@ class HeadroomBundle:
     """
 
     proxy_url: str = DEFAULT_PROXY_URL
-    serena_context: str = DEFAULT_SERENA_CONTEXT
     enable_headroom_mcp: bool = True
-    enable_serena_mcp: bool = True
     # The proxy is the single source of truth for compression — it sees
     # the full message list, owns CompressionPolicy, owns PrefixCacheTracker,
     # and places `cache_control` breakpoints. The in-process hook
@@ -151,7 +125,6 @@ class HeadroomBundle:
     config: HeadroomConfig | None = None
 
     _headroom_mcp: MCPClient | None = field(default=None, init=False, repr=False, compare=False)
-    _serena_mcp: MCPClient | None = field(default=None, init=False, repr=False, compare=False)
     _hook: HeadroomHookProvider | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -160,12 +133,6 @@ class HeadroomBundle:
             logger.info(
                 "HeadroomBundle: Headroom MCP client constructed (proxy_url=%s)",
                 self.proxy_url,
-            )
-        if self.enable_serena_mcp:
-            self._serena_mcp = _make_serena_client(self.serena_context)
-            logger.info(
-                "HeadroomBundle: Serena MCP client constructed (context=%s)",
-                self.serena_context,
             )
         if self.enable_hooks:
             self._hook = HeadroomHookProvider(config=self.config)
@@ -181,8 +148,6 @@ class HeadroomBundle:
         out: list[Any] = []
         if self._headroom_mcp is not None:
             out.append(self._headroom_mcp)
-        if self._serena_mcp is not None:
-            out.append(self._serena_mcp)
         return out
 
     @property
@@ -194,8 +159,3 @@ class HeadroomBundle:
     def headroom_mcp(self) -> MCPClient | None:
         """Direct handle to the Headroom MCPClient (for advanced callers)."""
         return self._headroom_mcp
-
-    @property
-    def serena_mcp(self) -> MCPClient | None:
-        """Direct handle to the Serena MCPClient (for advanced callers)."""
-        return self._serena_mcp

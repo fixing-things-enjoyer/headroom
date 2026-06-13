@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import threading
 from collections import defaultdict
 from datetime import datetime
@@ -24,6 +25,16 @@ from headroom.observability import get_otel_metrics
 from headroom.proxy.savings_tracker import SavingsTracker
 
 logger = logging.getLogger("headroom.proxy")
+
+MAX_DISTINCT_STACKS = 32
+_STACK_SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+
+def _normalize_stack(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    slug = raw.strip().lower()
+    return slug if _STACK_SLUG_RE.match(slug) else None
 
 
 def _escape_label_value(value: str) -> str:
@@ -385,9 +396,7 @@ class PrometheusMetrics:
         validation, or would exceed the cardinality cap.
         """
 
-        from headroom.telemetry.context import MAX_DISTINCT_STACKS, normalize_stack
-
-        slug = normalize_stack(stack)
+        slug = _normalize_stack(stack)
         if not slug:
             return
         if (

@@ -141,8 +141,6 @@ def build_manifest(
         base_env["HEADROOM_ANYLLM_PROVIDER"] = anyllm_provider
     if region:
         base_env["HEADROOM_REGION"] = region
-    if not telemetry_enabled:
-        base_env["HEADROOM_TELEMETRY"] = "off"
     if memory_enabled:
         base_env["HEADROOM_MEMORY_ENABLED"] = "1"
 
@@ -156,8 +154,6 @@ def build_manifest(
         "--backend",
         backend,
     ]
-    if not telemetry_enabled:
-        proxy_args.append("--no-telemetry")
     if memory_enabled:
         proxy_args.extend(["--memory", "--memory-db-path", str(_paths.memory_db_path())])
     if anyllm_provider:

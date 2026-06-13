@@ -160,9 +160,6 @@ from headroom.subscription.tracker import (
     configure_subscription_tracker,
     get_subscription_tracker,
 )
-from headroom.telemetry import get_telemetry_collector
-from headroom.telemetry.beacon import is_telemetry_enabled
-from headroom.telemetry.toin import get_toin
 from headroom.transforms import (
     CacheAligner,
     CodeAwareCompressor,
@@ -928,16 +925,7 @@ class HeadroomProxy(
                     "hint=bridge_syncs_only_the_legacy_DB_today_per-project_bridge_follow-up_planned"
                 )
 
-        # Usage Reporter (license validation + phone-home for managed/enterprise)
         self.usage_reporter: UsageReporter | None = None
-        if config.license_key:
-            from headroom.telemetry.reporter import UsageReporter
-
-            self.usage_reporter = UsageReporter(
-                license_key=config.license_key,
-                cloud_url=config.license_cloud_url,
-                report_interval=config.license_report_interval,
-            )
 
         # Traffic Learner (live pattern extraction from proxy traffic)
         # Only activates with --learn flag; requires --memory for backend
@@ -1358,15 +1346,6 @@ class HeadroomProxy(
                 "(set GITHUB_TOKEN or GITHUB_COPILOT_GITHUB_TOKEN to enable)"
             )
 
-        # Log anonymous telemetry status so operators can see it in the log stream
-        if is_telemetry_enabled():
-            logger.info(
-                "Anonymous telemetry: ENABLED (aggregate stats only — no prompts or content). "
-                "Opt out: HEADROOM_TELEMETRY=off or --no-telemetry"
-            )
-        else:
-            logger.info("Anonymous telemetry: DISABLED")
-
         self.pipeline_extensions.emit(
             PipelineStage.POST_START,
             operation="proxy.startup",
@@ -1582,33 +1561,6 @@ class HeadroomProxy(
         raise last_error
 
 
-async def _log_toin_stats_periodically(interval_seconds: int = 300) -> None:
-    """Background task that logs TOIN stats periodically.
-
-    Args:
-        interval_seconds: How often to log stats (default: 5 minutes).
-    """
-    while True:
-        await asyncio.sleep(interval_seconds)
-        try:
-            toin = get_toin()
-            stats = toin.get_stats()
-            total_compressions = stats.get("total_compressions", 0)
-            if total_compressions > 0:
-                patterns = stats.get("patterns_tracked", 0)
-                retrievals = stats.get("total_retrievals", 0)
-                retrieval_rate = stats.get("global_retrieval_rate", 0.0)
-                logger.info(
-                    "TOIN: %d patterns, %d compressions, %d retrievals, %.1f%% retrieval rate",
-                    patterns,
-                    total_compressions,
-                    retrievals,
-                    retrieval_rate * 100,
-                )
-        except Exception as e:
-            logger.debug("Failed to log TOIN stats: %s", e)
-
-
 def _register_memory_components(proxy: HeadroomProxy, tracker: MemoryTracker) -> None:
     """Register all memory-tracked components with the tracker.
 
@@ -1663,65 +1615,6 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
     config = config or ProxyConfig()
     proxy = HeadroomProxy(config)
 
-    # Telemetry beacon (anonymous aggregate stats).
-    # With uvicorn workers > 1, each worker runs the lifespan independently.
-    # We must ensure only ONE beacon runs across all workers — otherwise each
-    # worker creates its own beacon, spamming the telemetry table with N rows
-    # per cycle instead of 1 (all reading the same /stats from the same port).
-    #
-    # Strategy: use a file lock to ensure only the first worker starts the
-    # beacon. Other workers see the lock and skip.
-    from headroom.telemetry.beacon import TelemetryBeacon
-
-    _beacon = TelemetryBeacon(
-        port=config.port if hasattr(config, "port") else 8787,
-        sdk=os.environ.get("HEADROOM_SDK", "proxy").strip() or "proxy",
-        backend=config.backend if hasattr(config, "backend") else "anthropic",
-    )
-    from headroom import paths as _hr_paths
-
-    _beacon_lock_path = _hr_paths.beacon_lock_path(config.port)
-    _beacon_lock_fd: list = [None]  # mutable holder for the lock file descriptor
-    _beacon_is_owner: list = [False]
-
-    def _try_acquire_beacon_lock() -> bool:
-        """Try to acquire the beacon file lock (non-blocking).
-
-        Returns True if this process is the beacon owner.
-        """
-        if not HAS_FCNTL:
-            return True
-
-        fd = None
-        try:
-            _beacon_lock_path.parent.mkdir(parents=True, exist_ok=True)
-            fd = open(_beacon_lock_path, "w")  # noqa: SIM115
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            fd.write(str(os.getpid()))
-            fd.flush()
-            _beacon_lock_fd[0] = fd
-            return True
-        except OSError:
-            if fd is not None:
-                fd.close()
-            return False
-
-    def _release_beacon_lock() -> None:
-        """Release the beacon file lock."""
-        fd = _beacon_lock_fd[0]
-        if fd:
-            try:
-                if HAS_FCNTL:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-                fd.close()
-            except Exception:
-                pass
-            _beacon_lock_fd[0] = None
-        try:
-            _beacon_lock_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
         # Hotfix-A0: Rust core deployment smoke test. Refuse to accept
@@ -1749,18 +1642,10 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
             try:
                 # Startup
                 await proxy.startup()
-                asyncio.create_task(_log_toin_stats_periodically())
                 if proxy.usage_reporter:
                     await proxy.usage_reporter.start(proxy)
                 if proxy.traffic_learner:
                     await proxy.traffic_learner.start()
-
-                # Only start beacon if we acquire the lock (first worker wins)
-                _beacon_is_owner[0] = _try_acquire_beacon_lock()
-                if _beacon_is_owner[0]:
-                    await _beacon.start()
-                else:
-                    logger.debug("Beacon: skipping (another worker owns the lock)")
 
                 app.state.ready = True
                 yield
@@ -1770,9 +1655,6 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         finally:
             app.state.ready = False
             # Shutdown
-            if _beacon_is_owner[0]:
-                await _beacon.stop()
-                _release_beacon_lock()
             if proxy.usage_reporter:
                 await proxy.usage_reporter.stop()
             if proxy.traffic_learner:
@@ -2344,10 +2226,6 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         store = get_compression_store()
         compression_stats = store.get_stats()
 
-        # Get telemetry/TOIN stats
-        telemetry = get_telemetry_collector()
-        telemetry_stats = telemetry.get_stats()
-
         # Get feedback loop stats
         feedback = get_compression_feedback()
         feedback_stats = feedback.get_stats()
@@ -2686,16 +2564,6 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
                 "ccr_retrievals": compression_stats.get("total_retrievals", 0),
             },
             "compression_cache": compression_cache_stats,
-            "anon_telemetry_shipping": is_telemetry_enabled(),
-            "telemetry": {
-                "enabled": telemetry_stats.get("enabled", False),
-                "total_compressions": telemetry_stats.get("total_compressions", 0),
-                "total_retrievals": telemetry_stats.get("total_retrievals", 0),
-                "global_retrieval_rate": round(telemetry_stats.get("global_retrieval_rate", 0), 4),
-                "tool_signatures_tracked": telemetry_stats.get("tool_signatures_tracked", 0),
-                "avg_compression_ratio": round(telemetry_stats.get("avg_compression_ratio", 0), 4),
-                "avg_token_reduction": round(telemetry_stats.get("avg_token_reduction", 0), 4),
-            },
             "otel": get_otel_metrics_status(),
             "langfuse": get_langfuse_tracing_status(),
             "feedback_loop": {
@@ -2709,7 +2577,6 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
                     if p.get("retrieval_rate", 0) > 0.3
                 ),
             },
-            "toin": get_toin().get_stats(),
             "context_tool": {
                 "configured": cli_filtering_tool,
                 "label": cli_filtering_label,
@@ -3087,196 +2954,6 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
             else None,
         }
 
-    # Telemetry endpoints (Data Flywheel)
-    @app.get("/v1/telemetry")
-    async def telemetry_stats():
-        """Get telemetry statistics for the data flywheel.
-
-        This endpoint exposes privacy-preserving telemetry data that powers
-        the data flywheel - learning optimal compression strategies across
-        tool types based on usage patterns.
-
-        What's collected (anonymized):
-        - Tool output structure patterns (field types, not values)
-        - Compression decisions and ratios
-        - Retrieval patterns (rate, type, not content)
-        - Strategy effectiveness
-
-        What's NOT collected:
-        - Actual data values
-        - User identifiers
-        - Queries or search terms
-        - File paths or tool names (hashed by default)
-        """
-        telemetry = get_telemetry_collector()
-        return telemetry.get_stats()
-
-    @app.get("/v1/telemetry/export")
-    async def telemetry_export():
-        """Export full telemetry data for aggregation.
-
-        This endpoint exports all telemetry data in a format suitable for
-        cross-user aggregation. The data is privacy-preserving - no actual
-        values are included, only structural patterns and statistics.
-
-        Use this for:
-        - Building a central learning service
-        - Sharing learned patterns across instances
-        - Analysis and debugging
-        """
-        telemetry = get_telemetry_collector()
-        return telemetry.export_stats()
-
-    @app.post("/v1/telemetry/import")
-    async def telemetry_import(request: Request):
-        """Import telemetry data from another source.
-
-        This allows merging telemetry from multiple sources for cross-user
-        learning. The imported data is merged with existing statistics.
-
-        Request body: Telemetry export data from /v1/telemetry/export
-        """
-        telemetry = get_telemetry_collector()
-        data = await request.json()
-        telemetry.import_stats(data)
-        return {"status": "imported", "current_stats": telemetry.get_stats()}
-
-    @app.get("/v1/telemetry/tools")
-    async def telemetry_tools():
-        """Get telemetry statistics for all tracked tool signatures.
-
-        Returns statistics per tool signature (anonymized), including:
-        - Compression ratios and strategy usage
-        - Retrieval rates (high = compression too aggressive)
-        - Learned recommendations
-        """
-        telemetry = get_telemetry_collector()
-        all_stats = telemetry.get_all_tool_stats()
-        return {
-            "tool_count": len(all_stats),
-            "tools": {sig_hash: stats.to_dict() for sig_hash, stats in all_stats.items()},
-        }
-
-    @app.get("/v1/telemetry/tools/{signature_hash}")
-    async def telemetry_tool_detail(signature_hash: str):
-        """Get detailed telemetry for a specific tool signature.
-
-        Includes learned recommendations if enough data has been collected.
-        """
-        telemetry = get_telemetry_collector()
-        stats = telemetry.get_tool_stats(signature_hash)
-        recommendations = telemetry.get_recommendations(signature_hash)
-
-        if stats is None:
-            raise HTTPException(
-                status_code=404, detail=f"No telemetry found for signature: {signature_hash}"
-            )
-
-        return {
-            "signature_hash": signature_hash,
-            "stats": stats.to_dict(),
-            "recommendations": recommendations,
-        }
-
-    # TOIN (Tool Output Intelligence Network) endpoints
-    @app.get("/v1/toin/stats")
-    async def toin_stats():
-        """Get overall TOIN statistics.
-
-        Returns aggregated statistics from the Tool Output Intelligence Network,
-        which learns optimal compression strategies across all tool types.
-
-        Response includes:
-        - enabled: Whether TOIN is enabled
-        - patterns_tracked: Number of unique tool patterns being tracked
-        - total_compressions: Total compression events recorded
-        - total_retrievals: Total retrieval events recorded
-        - global_retrieval_rate: Overall retrieval rate (high = compression too aggressive)
-        - patterns_with_recommendations: Patterns with enough data for recommendations
-        """
-        toin = get_toin()
-        return toin.get_stats()
-
-    @app.get("/v1/toin/patterns")
-    async def toin_patterns(limit: int = 20):
-        """List TOIN patterns with most samples.
-
-        Returns patterns sorted by sample_size descending. Use this to see
-        which tool types have the most data and their learned behaviors.
-
-        Query params:
-            limit: Maximum number of patterns to return (default 20)
-
-        Response includes for each pattern:
-        - hash: Truncated tool signature hash (12 chars)
-        - compressions: Total compression events
-        - retrievals: Total retrieval events
-        - retrieval_rate: Percentage of compressions that triggered retrieval
-        - confidence: Confidence level in recommendations (0.0-1.0)
-        - skip_recommended: Whether TOIN recommends skipping compression
-        - optimal_max_items: Learned optimal max_items setting
-        """
-        toin = get_toin()
-        exported = toin.export_patterns()
-        patterns_data = exported.get("patterns", {})
-
-        # Convert to list and sort by sample_size
-        patterns_list = []
-        for sig_hash, pattern_dict in patterns_data.items():
-            sample_size = pattern_dict.get("sample_size", 0)
-            total_compressions = pattern_dict.get("total_compressions", 0)
-            total_retrievals = pattern_dict.get("total_retrievals", 0)
-            retrieval_rate = (
-                total_retrievals / total_compressions if total_compressions > 0 else 0.0
-            )
-
-            patterns_list.append(
-                {
-                    "hash": sig_hash[:12],
-                    "compressions": total_compressions,
-                    "retrievals": total_retrievals,
-                    "retrieval_rate": f"{retrieval_rate:.1%}",
-                    "confidence": round(pattern_dict.get("confidence", 0.0), 3),
-                    "skip_recommended": pattern_dict.get("skip_compression_recommended", False),
-                    "optimal_max_items": pattern_dict.get("optimal_max_items", 20),
-                    "sample_size": sample_size,
-                }
-            )
-
-        # Sort by sample_size descending
-        patterns_list.sort(key=lambda p: p["sample_size"], reverse=True)
-
-        # Remove sample_size from output (used only for sorting)
-        for p in patterns_list:
-            del p["sample_size"]
-
-        return patterns_list[:limit]
-
-    @app.get("/v1/toin/pattern/{hash_prefix}")
-    async def toin_pattern_detail(hash_prefix: str):
-        """Get detailed TOIN pattern info by hash prefix.
-
-        Searches for a pattern where the tool signature hash starts with
-        the provided prefix. Returns full pattern details if found.
-
-        Path params:
-            hash_prefix: Beginning of the tool signature hash (min 4 chars recommended)
-
-        Response: Full pattern.to_dict() with all learned statistics and recommendations.
-        """
-        toin = get_toin()
-        exported = toin.export_patterns()
-        patterns_data = exported.get("patterns", {})
-
-        # Search for pattern with matching hash prefix
-        for sig_hash, pattern_dict in patterns_data.items():
-            if sig_hash.startswith(hash_prefix):
-                return pattern_dict
-
-        raise HTTPException(
-            status_code=404, detail=f"No TOIN pattern found with hash starting with: {hash_prefix}"
-        )
-
     @app.get("/v1/retrieve/{hash_key}")
     async def ccr_retrieve_get(hash_key: str, query: str | None = None):
         """GET version of CCR retrieve for easier testing."""
@@ -3591,12 +3268,6 @@ def run_server(
 ║    /v1/retrieve/tool_call   CCR: Handle LLM tool calls               ║
 ║    /v1/feedback             CCR: Feedback loop stats & patterns      ║
 ║    /v1/feedback/{{tool}}    CCR: Compression hints for a tool        ║
-║    /v1/telemetry            Data flywheel: Telemetry stats           ║
-║    /v1/telemetry/export     Data flywheel: Export for aggregation    ║
-║    /v1/telemetry/tools      Data flywheel: Per-tool stats            ║
-║    /v1/toin/stats           TOIN: Overall intelligence stats         ║
-║    /v1/toin/patterns        TOIN: List learned patterns              ║
-║    /v1/toin/pattern/{{hash}} TOIN: Pattern details by hash            ║
 ╚══════════════════════════════════════════════════════════════════════╝
 """)
 

@@ -565,11 +565,6 @@ def _selected_context_tool() -> str:
     help="AWS profile name for Bedrock (default: use default credentials)",
 )
 @click.option(
-    "--no-telemetry",
-    is_flag=True,
-    help="Disable anonymous usage telemetry (env: HEADROOM_TELEMETRY=off)",
-)
-@click.option(
     "--stateless",
     is_flag=True,
     help="Disable all filesystem writes — run purely in-memory. "
@@ -649,7 +644,6 @@ def proxy(
     region: str,
     bedrock_region: str | None,
     bedrock_profile: str | None,
-    no_telemetry: bool,
     stateless: bool,
     embedding_server: bool,
     embedding_server_socket: str | None,
@@ -746,19 +740,11 @@ def proxy(
         "on",
     )
 
-    # Telemetry opt-out: --no-telemetry flag sets the env var
-    if no_telemetry:
-        os.environ["HEADROOM_TELEMETRY"] = "off"
-
     if codex_wire_debug or codex_wire_debug_dir:
         os.environ["HEADROOM_CODEX_WIRE_DEBUG"] = "1"
         os.environ["HEADROOM_CODEX_WIRE_DEBUG_DIR"] = codex_wire_debug_dir or str(
             _paths.codex_wire_debug_dir()
         )
-
-    # Stateless mode: suppress TOIN filesystem persistence
-    if is_stateless:
-        os.environ["HEADROOM_TOIN_BACKEND"] = "none"
 
     # License key for managed/enterprise deployments (optional)
     license_key = os.environ.get("HEADROOM_LICENSE_KEY")
@@ -946,20 +932,7 @@ Memory (Multi-Provider):
     # Stateless mode warning
     stateless_line = ""
     if is_stateless:
-        stateless_line = (
-            "  Stateless:    YES (no filesystem writes — memory, logs, TOIN disabled)\n"
-        )
-
-    from headroom.telemetry.beacon import is_telemetry_enabled
-
-    # Build telemetry section for the startup banner
-    if is_telemetry_enabled():
-        telemetry_line = (
-            "  Telemetry:    ENABLED (anonymous aggregate stats)\n"
-            "                Disable: HEADROOM_TELEMETRY=off or headroom proxy --no-telemetry"
-        )
-    else:
-        telemetry_line = "  Telemetry:    DISABLED"
+        stateless_line = "  Stateless:    YES (no filesystem writes — memory, logs disabled)\n"
 
     # Discover proxy extensions (third-party packages registered via the
     # `headroom.proxy_extension` entry-point group). Surfaced in the banner
@@ -1041,7 +1014,7 @@ Starting proxy server...
 {code_aware_line}
 {context_tool_line}
 {extensions_line}
-{stateless_line}{telemetry_line}
+{stateless_line}
 {backend_section}{tuning_section}
 
 Routing:

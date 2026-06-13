@@ -7,7 +7,7 @@ writes files. It introduces two canonical roots:
   ``~/.headroom/config``). Holds model catalogs, plugin settings, and other
   configuration that users or admins edit.
 * ``HEADROOM_WORKSPACE_DIR`` -- read-write state (defaults to ``~/.headroom``).
-  Holds runtime caches, telemetry outputs, logs, savings history, memory
+  Holds runtime caches, logs, savings history, memory
   databases, and anything else that the running proxy/CLI writes to.
 
 Precedence for every per-resource helper is::
@@ -16,7 +16,7 @@ Precedence for every per-resource helper is::
     default
 
 Adding the canonical root env vars is strictly additive: every existing
-per-resource override (``HEADROOM_SAVINGS_PATH``, ``HEADROOM_TOIN_PATH``,
+per-resource override (``HEADROOM_SAVINGS_PATH``,
 ``HEADROOM_SUBSCRIPTION_STATE_PATH``, ``HEADROOM_MODEL_LIMITS``, ...)
 continues to take precedence with identical semantics.
 
@@ -47,7 +47,6 @@ HEADROOM_WORKSPACE_DIR_ENV = "HEADROOM_WORKSPACE_DIR"
 # ---------------------------------------------------------------------------
 
 HEADROOM_SAVINGS_PATH_ENV = "HEADROOM_SAVINGS_PATH"
-HEADROOM_TOIN_PATH_ENV = "HEADROOM_TOIN_PATH"
 HEADROOM_SUBSCRIPTION_STATE_PATH_ENV = "HEADROOM_SUBSCRIPTION_STATE_PATH"
 
 # ---------------------------------------------------------------------------
@@ -59,7 +58,6 @@ _CONFIG_DIR_DEFAULT_SUFFIX = "config"
 
 # Resource file/sub-dir names (kept here so nothing else has to hardcode them)
 _SAVINGS_FILE = "proxy_savings.json"
-_TOIN_FILE = "toin.json"
 _MODELS_FILE = "models.json"
 _SUBSCRIPTION_FILE = "subscription_state.json"
 _MEMORY_DB_FILE = "memory.db"
@@ -176,21 +174,6 @@ def savings_path(explicit: str | os.PathLike[str] | None = None) -> Path:
         explicit,
         HEADROOM_SAVINGS_PATH_ENV,
         workspace_dir() / _SAVINGS_FILE,
-    )
-
-
-def toin_path(explicit: str | os.PathLike[str] | None = None) -> Path:
-    """Return the path for the TOIN telemetry JSON file.
-
-    TOIN is classified as workspace state because it is actively written by
-    the running proxy (it's a compression feedback loop). The default stays
-    ``~/.headroom/toin.json`` to preserve byte-for-byte backward compat.
-    """
-
-    return _resolve(
-        explicit,
-        HEADROOM_TOIN_PATH_ENV,
-        workspace_dir() / _TOIN_FILE,
     )
 
 
@@ -344,14 +327,12 @@ __all__ = [
     "HEADROOM_CONFIG_DIR_ENV",
     "HEADROOM_WORKSPACE_DIR_ENV",
     "HEADROOM_SAVINGS_PATH_ENV",
-    "HEADROOM_TOIN_PATH_ENV",
     "HEADROOM_SUBSCRIPTION_STATE_PATH_ENV",
     "config_dir",
     "workspace_dir",
     "ensure_config_dir",
     "ensure_workspace_dir",
     "savings_path",
-    "toin_path",
     "subscription_state_path",
     "memory_db_path",
     "native_memory_dir",

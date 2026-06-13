@@ -194,12 +194,11 @@ def policy_for_mode(mode: AuthMode) -> CompressionPolicy:
     """Resolve the F2.1+F2.2 policy for an auth mode.
 
     PAYG and OAuth are identical (aggressive: live-zone-not-only,
-    cache-aligner on, relaxed thresholds, TOIN write-enabled).
+    cache-aligner on, relaxed thresholds).
     Subscription is the user-visible win: live-zone-only with cache
-    aligner disabled, tighter thresholds, TOIN read-only.
+    aligner disabled, tighter thresholds.
 
-    F2.2-followup may diverge OAuth from PAYG once telemetry is
-    collected.
+    F2.2-followup may diverge OAuth from PAYG once separate tuning data exists.
     """
     if mode == AuthMode.PAYG:
         return CompressionPolicy(

@@ -241,19 +241,6 @@ def _resolve_wrap_proxy_timeout_seconds() -> int:
     return timeout_seconds
 
 
-def _print_telemetry_notice() -> None:
-    """Print a telemetry notice when anonymous telemetry is enabled.
-
-    Respects the HEADROOM_TELEMETRY and HEADROOM_TELEMETRY_WARN feature flags.
-    Does nothing when telemetry or warnings are disabled.
-    """
-    from headroom.telemetry.beacon import format_telemetry_notice
-
-    notice = format_telemetry_notice(prefix="  ")
-    if notice:
-        click.echo(notice)
-
-
 # Proxy health check (reused from evals/suite_runner.py pattern)
 
 
@@ -599,53 +586,6 @@ def _setup_headroom_mcp(
     )
     if line is not None:
         click.echo(line)
-
-
-def _setup_serena_mcp(
-    registrar: Any, *, context: str, verbose: bool = False, force: bool = False
-) -> None:
-    """Register Serena MCP with the given agent (idempotent)."""
-    from headroom.mcp_registry import build_serena_spec, format_result
-    from headroom.mcp_registry.base import RegisterStatus
-    from headroom.mcp_registry.ledger import record_install
-
-    if not registrar.detect():
-        if verbose:
-            click.echo(f"  Serena MCP: {registrar.display_name} not detected — skipping")
-        return
-
-    if shutil.which("uvx") is None:
-        click.echo("  Serena MCP: uvx not found — install uv/uvx to enable Serena; skipping")
-        return
-
-    spec = build_serena_spec(context)
-    result = registrar.register_server(spec, force=force)
-    if result.status == RegisterStatus.REGISTERED:
-        record_install(registrar.name, spec)
-
-    line = format_result(
-        registrar.name,
-        result,
-        label="Serena MCP",
-        verbose=verbose,
-        overwrite_hint="update or remove the existing serena MCP entry, then rerun headroom wrap",
-        restart_hint=f"restart {registrar.display_name} if it was already running",
-    )
-    if line is not None:
-        click.echo(line)
-
-
-def _remove_headroom_installed_serena_mcp(registrar: Any) -> str:
-    """Remove Serena MCP only if the ledger proves Headroom installed it."""
-    from headroom.mcp_registry.ledger import clear_install, headroom_installed_matching
-
-    current = registrar.get_server("serena")
-    if not headroom_installed_matching(registrar.name, current):
-        return "not_headroom_owned"
-    if registrar.unregister_server("serena"):
-        clear_install(registrar.name, "serena")
-        return "removed"
-    return "failed"
 
 
 _CBM_MCP_SERVER_NAME = "codebase-memory-mcp"
@@ -2339,7 +2279,6 @@ def _launch_tool(
             click.echo(f"  {var}")
         if args:
             click.echo(f"  Extra args: {' '.join(args)}")
-        _print_telemetry_notice()
         click.echo()
 
         result = subprocess.run([binary, *args], env=env)
@@ -2600,7 +2539,6 @@ def unwrap() -> None:
     is_flag=True,
     help="Skip headroom MCP server registration (compression markers will be unactionable)",
 )
-@click.option("--no-serena", is_flag=True, help="Skip Serena MCP server registration")
 @click.option(
     "--code-graph",
     is_flag=True,
@@ -2631,7 +2569,6 @@ def claude(
     port: int,
     no_rtk: bool,
     no_mcp: bool,
-    no_serena: bool,
     code_graph: bool,
     no_proxy: bool,
     learn: bool,
@@ -2656,7 +2593,6 @@ def claude(
         headroom wrap claude --code-graph        # With code graph intelligence
         headroom wrap claude --no-context-tool  # Skip CLI context-tool setup
         headroom wrap claude --no-mcp           # Skip MCP retrieve tool registration
-        headroom wrap claude --no-serena        # Skip Serena MCP registration
     """
     if prepare_only:
         if not no_rtk:
@@ -2765,13 +2701,6 @@ def claude(
         elif verbose:
             click.echo("  Skipping MCP retrieve tool (--no-mcp)")
 
-        if not no_serena:
-            from headroom.mcp_registry import ClaudeRegistrar
-
-            _setup_serena_mcp(ClaudeRegistrar(), context="claude-code", verbose=verbose)
-        elif verbose:
-            click.echo("  Skipping Serena MCP (--no-serena)")
-
         if code_graph:
             _setup_code_graph(verbose=verbose)
 
@@ -2786,7 +2715,6 @@ def claude(
             click.echo(f"  ANTHROPIC_BASE_URL={proxy_url}")
         if claude_args:
             click.echo(f"  Extra args: {' '.join(claude_args)}")
-        _print_telemetry_notice()
         click.echo()
 
         env = os.environ.copy()
@@ -2855,17 +2783,12 @@ def unwrap_claude(
         if registrar.detect():
             removed_headroom = registrar.unregister_server("headroom")
             removed_code_graph = registrar.unregister_server(_CBM_MCP_SERVER_NAME)
-            serena_status = _remove_headroom_installed_serena_mcp(registrar)
             if removed_headroom:
                 click.echo("  Removed Headroom MCP retrieve tool from Claude.")
             else:
                 click.echo("  Headroom MCP retrieve tool was not registered in Claude.")
             if removed_code_graph:
                 click.echo("  Removed code graph MCP server from Claude.")
-            if serena_status == "removed":
-                click.echo("  Removed Headroom-installed Serena MCP server from Claude.")
-            elif serena_status == "failed":
-                click.echo("  Serena MCP server matched Headroom ledger but could not be removed.")
         else:
             click.echo("  Claude Code not detected; skipped MCP cleanup.")
     else:
@@ -3160,7 +3083,6 @@ def copilot(
     is_flag=True,
     help="Skip headroom MCP server registration (compression markers will be unactionable)",
 )
-@click.option("--no-serena", is_flag=True, help="Skip Serena MCP server registration")
 @click.option(
     "--code-graph",
     is_flag=True,
@@ -3191,7 +3113,6 @@ def codex(
     port: int,
     no_rtk: bool,
     no_mcp: bool,
-    no_serena: bool,
     code_graph: bool,
     no_proxy: bool,
     learn: bool,
@@ -3218,7 +3139,6 @@ def codex(
         headroom wrap codex -- "fix the bug"        # Pass prompt to codex
         headroom wrap codex --no-context-tool       # Skip CLI context-tool setup
         headroom wrap codex --no-mcp                # Skip MCP retrieve tool registration
-        headroom wrap codex --no-serena             # Skip Serena MCP registration
         headroom wrap codex --port 9999             # Custom proxy port
         headroom wrap codex --backend anyllm --anyllm-provider groq
     """
@@ -3259,13 +3179,6 @@ def codex(
         _setup_headroom_mcp(CodexRegistrar(), port, verbose=verbose, force=True)
     elif verbose:
         click.echo("  Skipping MCP retrieve tool (--no-mcp)")
-
-    if not no_serena:
-        from headroom.mcp_registry import CodexRegistrar
-
-        _setup_serena_mcp(CodexRegistrar(), context="codex", verbose=verbose, force=True)
-    elif verbose:
-        click.echo("  Skipping Serena MCP (--no-serena)")
 
     # Setup memory MCP server for Codex (native tool integration)
     if memory:

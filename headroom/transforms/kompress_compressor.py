@@ -14,7 +14,6 @@ Usage:
 
 from __future__ import annotations
 
-import contextlib
 import gc
 import hashlib
 import logging
@@ -206,7 +205,7 @@ def _kompress_content_signature(content: str) -> Any:
     teach TOIN about this class of compressed content without storing the
     content or treating it as an anonymous fallback.
     """
-    from ..telemetry.models import ToolSignature
+    from ..compression.signature import ToolSignature
 
     words = content.split()
     line_count = content.count("\n") + 1 if content else 0
@@ -1294,17 +1293,6 @@ class KompressCompressor(Transform):
                 tool_signature_hash=signature.structure_hash,
                 compression_strategy="kompress",
             )
-            with contextlib.suppress(Exception):
-                from ..telemetry import get_toin
-
-                get_toin().record_compression(
-                    tool_signature=signature,
-                    original_count=original_tokens,
-                    compressed_count=compressed_tokens,
-                    original_tokens=original_tokens,
-                    compressed_tokens=compressed_tokens,
-                    strategy="kompress",
-                )
             return cache_key
         except Exception:
             return None

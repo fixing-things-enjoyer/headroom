@@ -41,10 +41,7 @@ if TYPE_CHECKING:
 class LocalToolPattern:
     """Learned patterns for a specific tool type (local feedback).
 
-    MEDIUM FIX #18: Renamed from ToolPattern to avoid confusion with
-    headroom.telemetry.toin.ToolPattern which serves a different purpose:
-    - LocalToolPattern: Local feedback patterns keyed by tool_name
-    - toin.ToolPattern: Cross-user TOIN patterns keyed by tool_signature_hash
+    Local feedback patterns keyed by tool name.
     """
 
     tool_name: str
@@ -218,7 +215,7 @@ class CompressionFeedback:
             original_count: Original item count.
             compressed_count: Compressed item count.
             strategy: Compression strategy used (e.g., "SMART_SAMPLE", "TOP_N").
-            tool_signature_hash: Hash from ToolSignature for correlation with TOIN.
+            tool_signature_hash: Hash from ToolSignature for local correlation.
         """
         if not self._enable_learning or not tool_name:
             return
@@ -245,7 +242,7 @@ class CompressionFeedback:
                 if len(pattern.strategy_compressions) > 50:
                     self._truncate_strategy_dicts(pattern)
 
-            # Track signature hash for TOIN correlation
+            # Track signature hash for local correlation.
             if tool_signature_hash:
                 pattern.signature_hashes.add(tool_signature_hash)
                 # CRITICAL FIX: Use deterministic truncation for signature_hashes

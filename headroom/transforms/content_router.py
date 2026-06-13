@@ -148,19 +148,16 @@ def _create_content_signature(
 ) -> Any:
     """Create a ToolSignature for non-JSON content types.
 
-    This allows TOIN to track compression patterns for code, search results,
-    logs, and text - not just JSON arrays.
-
     Args:
         content_type: The type of content (e.g., "code_aware", "search", "log", "text").
         content: The content being compressed (for structural hints).
         language: Optional language hint for code.
 
     Returns:
-        A ToolSignature for TOIN tracking.
+        A ToolSignature for local cache correlation.
     """
     try:
-        from ..telemetry.models import ToolSignature
+        from ..compression.signature import ToolSignature
 
         # Create a deterministic structure hash based on content type
         # This groups similar content types together for pattern learning
@@ -175,8 +172,6 @@ def _create_content_signature(
         structure_hint = hashlib.sha256(content_sample.encode()).hexdigest()[:8]
         hash_input = f"{hash_input}:{structure_hint}"
 
-        # Keep SHA256: structure_hash feeds into TOIN which persists to disk.
-        # Changing hash function would invalidate all learned patterns.
         structure_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:24]
 
         return ToolSignature(
@@ -843,109 +838,9 @@ class ContentRouter(Transform):
         self._html_extractor: Any = None
         self._kompress: Any = None
 
-        # TOIN integration for cross-strategy learning
-        self._toin: Any = None
-
-        # F2.2: per-request CompressionPolicy, set from
-        # ``kwargs["compression_policy"]`` at the start of ``apply()``
-        # and read by ``_record_to_toin`` to gate TOIN writes when
-        # ``policy.toin_read_only`` is true (Subscription mode).
-        # Defaults to ``None`` so direct ``compress()`` callers (e.g.
-        # tests, hand-written pipelines that don't go through the
-        # proxy) keep pre-F2.2 behaviour: TOIN writes are not gated.
-        # Same pattern the existing ``_runtime_target_ratio`` /
-        # ``_runtime_kompress_model`` fields below use.
         self._runtime_compression_policy: Any = None
 
         self._cache = CompressionCache()
-
-    def _record_to_toin(
-        self,
-        strategy: CompressionStrategy,
-        content: str,
-        compressed: str,
-        original_tokens: int,
-        compressed_tokens: int,
-        language: str | None = None,
-        context: str = "",
-    ) -> None:
-        """Record compression to TOIN for cross-user learning.
-
-        This allows TOIN to track compression patterns for ALL content types,
-        not just JSON arrays. When the LLM retrieves original content via CCR,
-        TOIN learns which compressions users need to expand.
-
-        Args:
-            strategy: The compression strategy used.
-            content: Original content (for signature generation).
-            compressed: Compressed content.
-            original_tokens: Token count before compression.
-            compressed_tokens: Token count after compression.
-            language: Optional language hint for code.
-            context: Query context for pattern learning.
-        """
-        # Skip SmartCrusher - it handles its own TOIN recording
-        if strategy == CompressionStrategy.SMART_CRUSHER:
-            return
-
-        # Skip if no actual compression happened
-        if original_tokens <= compressed_tokens:
-            return
-
-        # F2.2 gate: when the active CompressionPolicy says
-        # ``toin_read_only=True`` (Subscription auth mode), don't
-        # mutate the TOIN learning pool from this request. Direct
-        # ``compress()`` callers don't go through ``apply()`` and
-        # have ``self._runtime_compression_policy is None`` — those
-        # keep their pre-F2.2 write-enabled behaviour.
-        policy = self._runtime_compression_policy
-        if policy is not None and policy.toin_read_only:
-            logger.debug(
-                "ContentRouter: skipping TOIN record_compression for %s "
-                "— policy.toin_read_only=True (auth_mode resolved as "
-                "Subscription, F2.2 gate)",
-                strategy.value,
-            )
-            return
-
-        try:
-            # Lazy load TOIN
-            if self._toin is None:
-                from ..telemetry.toin import get_toin
-
-                self._toin = get_toin()
-
-            # Create a content-type signature
-            signature = _create_content_signature(
-                content_type=strategy.value,
-                content=content,
-                language=language,
-            )
-
-            if signature is None:
-                return
-
-            # Record the compression
-            self._toin.record_compression(
-                tool_signature=signature,
-                original_count=1,  # Single content block
-                compressed_count=1,
-                original_tokens=original_tokens,
-                compressed_tokens=compressed_tokens,
-                strategy=strategy.value,
-                query_context=context if context else None,
-            )
-
-            logger.debug(
-                "TOIN: Recorded %s compression: %d → %d tokens",
-                strategy.value,
-                original_tokens,
-                compressed_tokens,
-            )
-
-        except Exception as e:
-            # TOIN recording should never break compression
-            logger.debug("TOIN recording failed (non-fatal): %s", e)
 
     def _timed_compress(
         self, content: str, context: str, bias: float
@@ -1498,15 +1393,6 @@ class ContentRouter(Transform):
                     output=compressed,
                     error=error,
                 )
-            self._record_to_toin(
-                strategy=strategy,
-                content=content,
-                compressed=compressed,
-                original_tokens=original_tokens,
-                compressed_tokens=compressed_tokens,
-                language=language,
-                context=context,
-            )
             return compressed, compressed_tokens, strategy_chain
 
         # Fallback: return unchanged
